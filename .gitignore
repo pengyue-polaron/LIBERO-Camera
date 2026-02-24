@@ -18,3 +18,4 @@ libero.egg-info/
 .vscode/
 
 .DS_Store
+datasets_camera/
