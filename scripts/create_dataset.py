@@ -20,6 +20,12 @@ from libero.libero.envs import *
 from libero.libero import get_libero_path
 
 
+def _as_text(value):
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return value
+
+
 def _quat_normalize_wxyz(quat):
     quat = np.asarray(quat, dtype=np.float64)
     norm = np.linalg.norm(quat)
@@ -59,15 +65,35 @@ def _euler_to_quat_wxyz(roll, pitch, yaw):
 
 
 def _extract_camera_pose_from_xml(xml_str, camera_name):
-    if isinstance(xml_str, bytes):
-        xml_str = xml_str.decode("utf-8")
-    root = ET.fromstring(xml_str)
+    root = ET.fromstring(_as_text(xml_str))
     for camera in root.iter("camera"):
         if camera.get("name") != camera_name:
             continue
         pos = np.fromstring(camera.get("pos", ""), sep=" ", dtype=np.float64)
         quat = np.fromstring(camera.get("quat", ""), sep=" ", dtype=np.float64)
         return pos, _quat_normalize_wxyz(quat)
+
+
+def _postprocess_model_xml_for_dataset(model_xml, cameras_dict):
+    xml_str = libero_utils.postprocess_model_xml(_as_text(model_xml), cameras_dict)
+    root = ET.fromstring(xml_str)
+    local_assets_root = os.path.join(os.getcwd(), "libero", "libero", "assets")
+
+    for tag in ("mesh", "texture"):
+        for elem in root.iter(tag):
+            file_path = elem.get("file")
+            if not file_path:
+                continue
+            normalized = file_path.replace("\\", "/")
+            marker = "/assets/"
+            if marker not in normalized:
+                continue
+            suffix = normalized.split(marker, 1)[1]
+            candidate = os.path.join(local_assets_root, suffix)
+            if os.path.exists(candidate):
+                elem.set("file", candidate)
+
+    return ET.tostring(root, encoding="utf8").decode("utf8")
 
 
 def _sample_camera_variation_pose(base_pos, base_quat, seed, variation_id, translate_range, rot_range_deg):
@@ -135,12 +161,22 @@ def main():
         parser.error("--camera-variation-count > 0 requires --use-camera-obs")
     hdf5_path = args.demo_file
     f = h5py.File(hdf5_path, "r")
-    env_name = f["data"].attrs["env"]
+    env_name = f["data"].attrs.get("env", f["data"].attrs.get("env_name"))
 
-    env_args = f["data"].attrs["env_info"]
-    env_kwargs = json.loads(f["data"].attrs["env_info"])
+    env_info_raw = f["data"].attrs.get("env_info")
+    env_kwargs = None
+    if env_info_raw not in (None, ""):
+        env_kwargs = json.loads(_as_text(env_info_raw))
+    else:
+        env_args_raw = f["data"].attrs.get("env_args")
+        if env_args_raw in (None, ""):
+            raise ValueError("HDF5 missing both env_info and env_args; cannot build env")
+        env_args_json = json.loads(_as_text(env_args_raw))
+        env_kwargs = env_args_json["env_kwargs"]
+        if env_name is None:
+            env_name = env_args_json.get("env_name")
 
-    problem_info = json.loads(f["data"].attrs["problem_info"])
+    problem_info = json.loads(_as_text(f["data"].attrs["problem_info"]))
     problem_info["domain_name"]
     problem_name = problem_info["problem_name"]
     language_instruction = problem_info["language_instruction"]
@@ -148,15 +184,15 @@ def main():
     # list of all demonstrations episodes
     demos = list(f["data"].keys())
 
-    bddl_file_name = f["data"].attrs["bddl_file_name"]
+    bddl_file_name = _as_text(f["data"].attrs["bddl_file_name"])
 
     bddl_file_dir = os.path.dirname(bddl_file_name)
-    replace_bddl_prefix = "/".join(bddl_file_dir.split("bddl_files/")[:-1] + "bddl_files")
-
     default_hdf5_path = os.path.join(get_libero_path("datasets"), bddl_file_dir.split("bddl_files/")[-1].replace(".bddl", "_demo.hdf5"))
 
     camera_variation_specs = []
     if args.camera_variation_count > 0:
+        if len(demos) == 0:
+            raise ValueError("Input demo file does not contain any episodes under /data")
 
         first_model_xml = f["data/{}".format(demos[0])].attrs["model_file"]
         base_pos, base_quat = _extract_camera_pose_from_xml(
@@ -284,13 +320,13 @@ def main():
             grp.attrs["camera_variation_translate_range"] = float(args.camera_variation_translate_range)
             grp.attrs["camera_variation_rot_range_deg"] = float(args.camera_variation_rot_range_deg)
 
-        env_args = {
-            "type": 1,
-            "env_name": env_name,
-            "problem_name": problem_name,
-            "bddl_file": f["data"].attrs["bddl_file_name"],
-            "env_kwargs": env_kwargs,
-        }
+            env_args = {
+                "type": 1,
+                "env_name": env_name,
+                "problem_name": problem_name,
+                "bddl_file": _as_text(f["data"].attrs["bddl_file_name"]),
+                "env_kwargs": env_kwargs,
+            }
 
         grp.attrs["env_args"] = json.dumps(env_args)
         print(grp.attrs["env_args"])
@@ -313,9 +349,7 @@ def main():
                 except:
                     continue
 
-            if isinstance(model_xml, bytes):
-                model_xml = model_xml.decode("utf-8")
-            model_xml = libero_utils.postprocess_model_xml(model_xml, cameras_dict)
+            model_xml = _postprocess_model_xml_for_dataset(model_xml, cameras_dict)
 
             if not args.use_camera_obs:
                 env.viewer.set_camera(0)
