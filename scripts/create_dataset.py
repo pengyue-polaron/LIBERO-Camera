@@ -206,7 +206,12 @@ def main():
     bddl_file_name = _as_text(f["data"].attrs["bddl_file_name"])
 
     bddl_file_dir = os.path.dirname(bddl_file_name)
-    default_hdf5_path = os.path.join(get_libero_path("datasets"), bddl_file_dir.split("bddl_files/")[-1].replace(".bddl", "_demo.hdf5"))
+
+    def _get_default_hdf5_path():
+        return os.path.join(
+            get_libero_path("datasets"),
+            bddl_file_dir.split("bddl_files/")[-1].replace(".bddl", "_demo.hdf5"),
+        )
 
     libero_utils.update_env_kwargs(
         env_kwargs,
@@ -293,9 +298,17 @@ def main():
             else None,
         )
 
-        output_dir = Path(args.camera_variation_output_dir) if args.camera_variation_output_dir else Path(default_hdf5_path).parent
+        if args.camera_variation_output_dir:
+            output_dir = Path(args.camera_variation_output_dir)
+        else:
+            output_dir = Path(_get_default_hdf5_path()).parent
         output_dir.mkdir(parents=True, exist_ok=True)
-        output_prefix = args.camera_variation_name_prefix or Path(default_hdf5_path).stem
+        output_prefix = args.camera_variation_name_prefix
+        if output_prefix is None:
+            if args.camera_variation_output_dir:
+                output_prefix = Path(args.demo_file).stem
+            else:
+                output_prefix = Path(_get_default_hdf5_path()).stem
 
         output_paths = []
         for pose in poses:
@@ -336,6 +349,7 @@ def main():
                 "Refusing to overwrite existing camera variation files:\n" + "\n".join(collisions)
             )
     else:
+        default_hdf5_path = _get_default_hdf5_path()
         output_parent_dir = Path(default_hdf5_path).parent
         output_parent_dir.mkdir(parents=True, exist_ok=True)
         camera_variation_specs.append(
