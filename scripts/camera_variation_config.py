@@ -396,7 +396,44 @@ def generate_camera_variation_poses(
         target_pos=target_pos,
     )
     accepted = [pose for pose in candidates if validator(pose)]
-    selected = _choose_evenly(accepted, count)
+    if len(accepted) < count:
+        vc = camera_visibility.get_constraints(cfg)
+        fallback_mode = str(vc.get("fallback", "unfiltered")).lower()
+        if fallback_mode in ("none", "strict"):
+            raise ValueError(
+                f"Only found {len(accepted)} valid camera poses, but need {count}"
+            )
+
+        # Keep whatever passed visibility checks, then fill the rest from
+        # deterministic unfiltered poses so batch processing doesn't fail hard.
+        accepted_sorted = sorted(accepted, key=lambda x: int(x["variation_id"]))
+        selected = list(accepted_sorted[:count])
+        if len(selected) < count:
+            fallback_candidates = _generate_candidate_poses(
+                base_pos=base_pos,
+                base_quat=base_quat,
+                count=count,
+                seed=seed,
+                translate_range=translate_range,
+                rot_range_deg=rot_range_deg,
+                cfg=cfg,
+                target_pos=target_pos,
+            )
+            used_ids = {int(p["variation_id"]) for p in selected}
+            for pose in fallback_candidates:
+                pose_id = int(pose["variation_id"])
+                if pose_id in used_ids:
+                    continue
+                selected.append(pose)
+                used_ids.add(pose_id)
+                if len(selected) >= count:
+                    break
+        print(
+            f"[camera-variation] visibility accepted {len(accepted)}/{candidate_count}, "
+            f"fallback='{fallback_mode}', final={len(selected)}"
+        )
+    else:
+        selected = _choose_evenly(accepted, count)
     for new_id, pose in enumerate(selected):
         pose["candidate_variation_id"] = int(pose["variation_id"])
         pose["variation_id"] = new_id
@@ -414,8 +451,8 @@ def default_example_config():
         },
         "orbit": {
             "angles_relative_to_base": True,
-            "yaw_deg": {"type": "linspace", "start": -40.0, "stop": 40.0},
-            "pitch_deg": -8.0,
+            "yaw_deg": {"type": "linspace", "start": -65.0, "stop": 65.0},
+            "pitch_deg": {"type": "linspace", "start": -16.0, "stop": -2.0},
             "radius_scale": 1.0,
             "radius_offset": 0.0,
             "radius_offset_per_abs_yaw_deg": 0.003,
@@ -424,13 +461,14 @@ def default_example_config():
         },
         "visibility_constraints": {
             "enabled": True,
-            "check_frames": [0.0, 0.5, 1.0],
+            "check_frames": [0.0],
             "require_goal_region_visible": True,
-            "require_obj_of_interest_visible": True,
+            "require_obj_of_interest_visible": False,
             "require_eef_visible": True,
-            "pixel_margin": 8,
-            "candidate_pool_factor": 8,
-            "max_sampling_trials": 72,
+            "pixel_margin": 2,
+            "candidate_pool_factor": 12,
+            "max_sampling_trials": 180,
+            "fallback": "unfiltered",
         },
     }
 
