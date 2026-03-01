@@ -26,6 +26,21 @@ def _iter_hdf5_files(dataset_root, file_pattern, skip_camvar_outputs):
     return files
 
 
+def _filter_skip_dirs(files, dataset_root, skip_dirs):
+    if not skip_dirs:
+        return files
+    skip_set = {s.strip() for s in skip_dirs if s and s.strip()}
+    if not skip_set:
+        return files
+    kept = []
+    for p in files:
+        rel_parts = set(p.relative_to(dataset_root).parts)
+        if rel_parts.intersection(skip_set):
+            continue
+        kept.append(p)
+    return kept
+
+
 def _ensure_episode(h5_file, episode):
     return "data" in h5_file and episode in h5_file["data"]
 
@@ -35,6 +50,20 @@ def _build_output_prefix(dataset_root, hdf5_path):
     parent = rel.parent
     stem = hdf5_path.stem
     return parent, stem
+
+
+def _expected_output_paths(args, hdf5_path):
+    rel_parent, stem = _build_output_prefix(Path(args.dataset_root), hdf5_path)
+    output_parent = Path(args.output_dir) / rel_parent
+    outputs = []
+    if args.grid_video:
+        outputs.append(output_parent / f"{stem}_{args.episode}_grid.mp4")
+    if not args.grid_only:
+        if args.include_original_view:
+            outputs.append(output_parent / f"{stem}_{args.episode}_original.mp4")
+        for variation_id in range(args.camera_variation_count):
+            outputs.append(output_parent / f"{stem}_{args.episode}_camvar_{variation_id:02d}.mp4")
+    return output_parent, outputs
 
 
 def _render_frames_for_variation(
@@ -118,6 +147,11 @@ def _write_frames_to_video(frames, out_file, fps):
 
 def _render_variation_videos_for_file(hdf5_path, args):
     hdf5_path = Path(hdf5_path)
+    output_parent, expected_outputs = _expected_output_paths(args, hdf5_path)
+    if args.resume and expected_outputs and all(p.exists() for p in expected_outputs):
+        print(f"[batch-preview] resume skip {hdf5_path}: all outputs already exist")
+        return 0
+
     with h5py.File(hdf5_path, "r") as f:
         if not _ensure_episode(f, args.episode):
             print(f"[batch-preview] skip {hdf5_path}: episode '{args.episode}' not found")
@@ -215,28 +249,31 @@ def _render_variation_videos_for_file(hdf5_path, args):
 
                 if not args.grid_only:
                     original_out_file = output_parent / f"{stem}_{args.episode}_original.mp4"
-                    if args.hide_video_labels:
-                        frames_for_original = [frame.copy() for frame in original_frames]
+                    if args.resume and original_out_file.exists():
+                        print(f"[batch-preview] resume skip existing: {original_out_file}")
                     else:
-                        frames_for_original = [
-                            cv2.putText(
-                                frame.copy(),
-                                original_label,
-                                (8, 20),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                0.5,
-                                (255, 255, 255),
-                                1,
-                                cv2.LINE_AA,
-                            )
-                            for frame in original_frames
-                        ]
-                    _write_frames_to_video(frames_for_original, original_out_file, args.fps)
-                    print(
-                        f"[batch-preview] saved {original_out_file} "
-                        f"frames={len(original_frames)} strategy=original"
-                    )
-                    count += 1
+                        if args.hide_video_labels:
+                            frames_for_original = [frame.copy() for frame in original_frames]
+                        else:
+                            frames_for_original = [
+                                cv2.putText(
+                                    frame.copy(),
+                                    original_label,
+                                    (8, 20),
+                                    cv2.FONT_HERSHEY_SIMPLEX,
+                                    0.5,
+                                    (255, 255, 255),
+                                    1,
+                                    cv2.LINE_AA,
+                                )
+                                for frame in original_frames
+                            ]
+                        _write_frames_to_video(frames_for_original, original_out_file, args.fps)
+                        print(
+                            f"[batch-preview] saved {original_out_file} "
+                            f"frames={len(original_frames)} strategy=original"
+                        )
+                        count += 1
 
             for pose in poses:
                 variation_id = int(pose["variation_id"])
@@ -267,44 +304,47 @@ def _render_variation_videos_for_file(hdf5_path, args):
 
                 if not args.grid_only:
                     out_file = output_parent / f"{stem}_{args.episode}_camvar_{variation_id:02d}.mp4"
-                    if args.grid_video:
-                        if args.hide_video_labels:
-                            frames_for_single = [frame.copy() for frame in frames]
-                        else:
-                            frames_for_single = [
-                                cv2.putText(
-                                    frame.copy(),
-                                    label,
-                                    (8, 20),
-                                    cv2.FONT_HERSHEY_SIMPLEX,
-                                    0.5,
-                                    (255, 255, 255),
-                                    1,
-                                    cv2.LINE_AA,
-                                )
-                                for frame in frames
-                            ]
-                        _write_frames_to_video(frames_for_single, out_file, args.fps)
+                    if args.resume and out_file.exists():
+                        print(f"[batch-preview] resume skip existing: {out_file}")
                     else:
-                        replay_utils._render_video_for_action_slice(
-                            env=env,
-                            model_xml=model_xml,
-                            init_state=init_state,
-                            actions=action_slice,
-                            cameras_dict=cameras_dict,
-                            video_path=out_file,
-                            fps=args.fps,
-                            draw_label=None if args.hide_video_labels else label,
-                            flip_vertical=env_flip_vertical,
-                            draw_bddl_regions=args.draw_bddl_regions,
-                            hide_region_labels=args.hide_region_labels,
-                            camera_name="agentview",
+                        if args.grid_video:
+                            if args.hide_video_labels:
+                                frames_for_single = [frame.copy() for frame in frames]
+                            else:
+                                frames_for_single = [
+                                    cv2.putText(
+                                        frame.copy(),
+                                        label,
+                                        (8, 20),
+                                        cv2.FONT_HERSHEY_SIMPLEX,
+                                        0.5,
+                                        (255, 255, 255),
+                                        1,
+                                        cv2.LINE_AA,
+                                    )
+                                    for frame in frames
+                                ]
+                            _write_frames_to_video(frames_for_single, out_file, args.fps)
+                        else:
+                            replay_utils._render_video_for_action_slice(
+                                env=env,
+                                model_xml=model_xml,
+                                init_state=init_state,
+                                actions=action_slice,
+                                cameras_dict=cameras_dict,
+                                video_path=out_file,
+                                fps=args.fps,
+                                draw_label=None if args.hide_video_labels else label,
+                                flip_vertical=env_flip_vertical,
+                                draw_bddl_regions=args.draw_bddl_regions,
+                                hide_region_labels=args.hide_region_labels,
+                                camera_name="agentview",
+                            )
+                        print(
+                            f"[batch-preview] saved {out_file} "
+                            f"frames={n_frames} strategy={pose.get('strategy', 'random_local')}"
                         )
-                    print(
-                        f"[batch-preview] saved {out_file} "
-                        f"frames={n_frames} strategy={pose.get('strategy', 'random_local')}"
-                    )
-                    count += 1
+                        count += 1
 
             if args.grid_video and grid_frame_lists:
                 grid_frames = _compose_grid_frames(
@@ -315,12 +355,15 @@ def _render_variation_videos_for_file(hdf5_path, args):
                     draw_labels=not args.hide_tile_labels,
                 )
                 grid_out_file = output_parent / f"{stem}_{args.episode}_grid.mp4"
-                _write_frames_to_video(grid_frames, grid_out_file, args.fps)
-                print(
-                    f"[batch-preview] saved {grid_out_file} "
-                    f"frames={len(grid_frames)} tiles={len(grid_frame_lists)}"
-                )
-                count += 1
+                if args.resume and grid_out_file.exists():
+                    print(f"[batch-preview] resume skip existing: {grid_out_file}")
+                else:
+                    _write_frames_to_video(grid_frames, grid_out_file, args.fps)
+                    print(
+                        f"[batch-preview] saved {grid_out_file} "
+                        f"frames={len(grid_frames)} tiles={len(grid_frame_lists)}"
+                    )
+                    count += 1
             return count
         finally:
             env.close()
@@ -332,9 +375,33 @@ def main():
     )
     parser.add_argument("--dataset-root", required=True)
     parser.add_argument("--output-dir", required=True)
+    parser.add_argument(
+        "--only-file",
+        type=str,
+        default=None,
+        help="Optional single HDF5 file path to process.",
+    )
     parser.add_argument("--episode", type=str, default="demo_0")
     parser.add_argument("--file-pattern", type=str, default="*.hdf5")
+    parser.add_argument(
+        "--skip-dirs",
+        type=str,
+        default="libero_90,libero90",
+        help="Comma-separated directory names to skip under dataset-root.",
+    )
     parser.add_argument("--skip-camvar-outputs", action="store_true")
+    parser.add_argument("--resume", action="store_true", help="Skip files with existing outputs.")
+    parser.add_argument(
+        "--continue-on-error",
+        action="store_true",
+        help="Continue processing other files even if one file fails.",
+    )
+    parser.add_argument(
+        "--fail-log",
+        type=str,
+        default=None,
+        help="Optional path to write failed file list.",
+    )
     parser.add_argument("--max-files", type=int, default=0)
     parser.add_argument(
         "--camera-variation-config",
@@ -407,21 +474,50 @@ def main():
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    files = _iter_hdf5_files(
-        dataset_root=dataset_root,
-        file_pattern=args.file_pattern,
-        skip_camvar_outputs=args.skip_camvar_outputs,
-    )
+    if args.only_file:
+        only_file = Path(args.only_file).resolve()
+        if not only_file.exists():
+            parser.error(f"--only-file does not exist: {only_file}")
+        try:
+            only_file.relative_to(dataset_root.resolve())
+        except Exception:
+            parser.error(f"--only-file must be inside --dataset-root: {only_file}")
+        files = [only_file]
+    else:
+        files = _iter_hdf5_files(
+            dataset_root=dataset_root,
+            file_pattern=args.file_pattern,
+            skip_camvar_outputs=args.skip_camvar_outputs,
+        )
+        skip_dirs = [x for x in args.skip_dirs.split(",")] if args.skip_dirs else []
+        files = _filter_skip_dirs(files, dataset_root=dataset_root, skip_dirs=skip_dirs)
     if args.max_files > 0:
         files = files[: args.max_files]
     if not files:
         parser.error(f"No HDF5 files found under {dataset_root} matching {args.file_pattern}")
 
     total_videos = 0
+    failed = []
     for path in files:
-        total_videos += _render_variation_videos_for_file(path, args)
+        try:
+            total_videos += _render_variation_videos_for_file(path, args)
+        except Exception as exc:
+            msg = f"{path}: {exc}"
+            print(f"[batch-preview] ERROR {msg}")
+            failed.append(msg)
+            if not args.continue_on_error:
+                raise
 
-    print(f"[batch-preview] done, rendered {total_videos} videos from {len(files)} files")
+    if failed and args.fail_log:
+        fail_log = Path(args.fail_log)
+        fail_log.parent.mkdir(parents=True, exist_ok=True)
+        fail_log.write_text("\n".join(failed) + "\n")
+        print(f"[batch-preview] wrote fail log: {fail_log}")
+
+    print(
+        f"[batch-preview] done, rendered {total_videos} videos from {len(files)} files, "
+        f"failed={len(failed)}"
+    )
 
 
 if __name__ == "__main__":

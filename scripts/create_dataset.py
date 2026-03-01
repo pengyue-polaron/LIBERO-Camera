@@ -165,6 +165,11 @@ def main():
     parser.add_argument("--camera-variation-output-dir", type=str, default=None)
     parser.add_argument("--camera-variation-name-prefix", type=str, default=None)
     parser.add_argument("--camera-variation-config", type=str, default=None)
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        help="Skip existing outputs and only generate missing files.",
+    )
 
     args = parser.parse_args()
     camera_variation_cfg = camvar_cfg.load_camera_variation_config(args.camera_variation_config)
@@ -343,15 +348,30 @@ def main():
                 f"delta_rpy_deg={pose['delta_rpy_deg'].tolist()}",
             )
 
-        collisions = [str(path) for path in output_paths if path.exists()]
-        if collisions:
-            raise FileExistsError(
-                "Refusing to overwrite existing camera variation files:\n" + "\n".join(collisions)
-            )
+        if args.resume:
+            kept_specs = []
+            for spec in camera_variation_specs:
+                out_path = Path(spec["output_path"])
+                if out_path.exists():
+                    print(f"[camera-variation] resume skip existing: {out_path}")
+                    continue
+                kept_specs.append(spec)
+            camera_variation_specs = kept_specs
+        else:
+            collisions = [str(path) for path in output_paths if path.exists()]
+            if collisions:
+                raise FileExistsError(
+                    "Refusing to overwrite existing camera variation files:\n" + "\n".join(collisions)
+                )
     else:
         default_hdf5_path = _get_default_hdf5_path()
         output_parent_dir = Path(default_hdf5_path).parent
         output_parent_dir.mkdir(parents=True, exist_ok=True)
+        if args.resume and Path(default_hdf5_path).exists():
+            print(f"[create-dataset] resume skip existing: {default_hdf5_path}")
+            env.close()
+            f.close()
+            return
         camera_variation_specs.append(
             {
                 "output_path": default_hdf5_path,
@@ -361,6 +381,12 @@ def main():
                 "base_quat": None,
             }
         )
+
+    if len(camera_variation_specs) == 0:
+        print("[create-dataset] resume: nothing to do")
+        env.close()
+        f.close()
+        return
 
     for camera_variation_spec in camera_variation_specs:
         hdf5_path = camera_variation_spec["output_path"]

@@ -30,6 +30,11 @@ def get_config_count(cfg):
 
 def get_effective_count(cli_count, cfg):
     cfg_count = get_config_count(cfg)
+    if cfg_count is None and (cfg or {}).get("strategy") == "manual_poses":
+        manual_poses = (cfg or {}).get("manual_poses", [])
+        if len(manual_poses) == 0:
+            raise ValueError("manual_poses strategy requires non-empty 'manual_poses'")
+        cfg_count = len(manual_poses)
     if cfg_count is None:
         return cli_count
     if cli_count not in (0, cfg_count):
@@ -322,6 +327,33 @@ def _generate_candidate_poses(
             raise ValueError("orbit_lookat config requires target_pos")
         return _sample_orbit_lookat_poses(base_pos=base_pos, count=count, cfg=cfg, target_pos=target_pos)
 
+    if strategy == "manual_poses":
+        manual = (cfg or {}).get("manual_poses", [])
+        if len(manual) == 0:
+            raise ValueError("manual_poses strategy requires non-empty 'manual_poses'")
+        if len(manual) < count:
+            raise ValueError(
+                f"manual_poses only has {len(manual)} entries, but need {count}"
+            )
+        poses = []
+        for i in range(count):
+            p = manual[i]
+            pos = np.asarray(p["pos"], dtype=np.float64)
+            quat = _quat_normalize_wxyz(np.asarray(p["quat"], dtype=np.float64))
+            if pos.shape != (3,) or quat.shape != (4,):
+                raise ValueError(f"Invalid manual pose at index {i}")
+            poses.append(
+                {
+                    "variation_id": i,
+                    "delta_pos": pos - np.asarray(base_pos, dtype=np.float64),
+                    "delta_rpy_deg": np.array([0.0, 0.0, 0.0], dtype=np.float64),
+                    "applied_pos": pos,
+                    "applied_quat": quat,
+                    "strategy": "manual_poses",
+                }
+            )
+        return poses
+
     raise ValueError(f"Unsupported camera variation strategy: {strategy}")
 
 
@@ -401,6 +433,22 @@ def generate_camera_variation_poses(
 ):
     if count <= 0:
         return []
+
+    if (cfg or {}).get("strategy") == "manual_poses":
+        poses = _generate_candidate_poses(
+            base_pos=base_pos,
+            base_quat=base_quat,
+            count=count,
+            seed=seed,
+            translate_range=translate_range,
+            rot_range_deg=rot_range_deg,
+            cfg=cfg,
+            target_pos=target_pos,
+        )
+        for new_id, pose in enumerate(poses):
+            pose["candidate_variation_id"] = int(pose["variation_id"])
+            pose["variation_id"] = new_id
+        return poses
 
     if validator is None or not camera_visibility.constraints_enabled(cfg):
         return _generate_candidate_poses(
@@ -495,7 +543,7 @@ def generate_camera_variation_poses(
 def default_example_config():
     return {
         "strategy": "orbit_lookat",
-        "count": 9,
+        "count": 5,
         "target": {
             "source": "eef_pos",
             "state_index": 0,

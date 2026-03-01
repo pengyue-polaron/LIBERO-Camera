@@ -1,6 +1,6 @@
 {
   "strategy": "orbit_lookat",
-  "count": 9,
+  "count": 5,
   "target": {
     "source": "eef_pos",
     "state_index": 0,
