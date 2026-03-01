@@ -1,0 +1,33 @@
+{
+  "strategy": "orbit_lookat",
+  "count": 9,
+  "target": {
+    "source": "eef_pos",
+    "state_index": 0,
+    "offset": [0.0, 0.0, 0.05]
+  },
+  "orbit": {
+    "angles_relative_to_base": true,
+    "yaw_deg": {
+      "type": "linspace",
+      "start": -40.0,
+      "stop": 40.0
+    },
+    "pitch_deg": -8.0,
+    "radius_scale": 1.0,
+    "radius_offset": 0.0,
+    "radius_offset_per_abs_yaw_deg": 0.003,
+    "radius_offset_per_abs_pitch_deg": 0.0,
+    "up_ref": [0.0, 0.0, 1.0]
+  },
+  "visibility_constraints": {
+    "enabled": true,
+    "check_frames": [0.0, 0.5, 1.0],
+    "require_goal_region_visible": true,
+    "require_obj_of_interest_visible": true,
+    "require_eef_visible": true,
+    "pixel_margin": 8,
+    "candidate_pool_factor": 8,
+    "max_sampling_trials": 72
+  }
+}

@@ -15,6 +15,8 @@ import libero.libero.utils.utils as libero_utils
 import cv2
 from PIL import Image
 from robosuite.utils import camera_utils
+import camera_variation_config as camvar_cfg
+import camera_visibility
 
 from libero.libero.envs import *
 from libero.libero import get_libero_path
@@ -30,38 +32,6 @@ def _quat_normalize_wxyz(quat):
     quat = np.asarray(quat, dtype=np.float64)
     norm = np.linalg.norm(quat)
     return quat / norm
-
-
-def _quat_multiply_wxyz(q1, q2):
-    w1, x1, y1, z1 = q1
-    w2, x2, y2, z2 = q2
-    return np.array(
-        [
-            w1 * w2 - x1 * x2 - y1 * y2 - z1 * z2,
-            w1 * x2 + x1 * w2 + y1 * z2 - z1 * y2,
-            w1 * y2 - x1 * z2 + y1 * w2 + z1 * x2,
-            w1 * z2 + x1 * y2 - y1 * x2 + z1 * w2,
-        ],
-        dtype=np.float64,
-    )
-
-
-def _euler_to_quat_wxyz(roll, pitch, yaw):
-    cr = math.cos(roll * 0.5)
-    sr = math.sin(roll * 0.5)
-    cp = math.cos(pitch * 0.5)
-    sp = math.sin(pitch * 0.5)
-    cy = math.cos(yaw * 0.5)
-    sy = math.sin(yaw * 0.5)
-    return np.array(
-        [
-            cr * cp * cy + sr * sp * sy,
-            sr * cp * cy - cr * sp * sy,
-            cr * sp * cy + sr * cp * sy,
-            cr * cp * sy - sr * sp * cy,
-        ],
-        dtype=np.float64,
-    )
 
 
 def _extract_camera_pose_from_xml(xml_str, camera_name):
@@ -96,22 +66,68 @@ def _postprocess_model_xml_for_dataset(model_xml, cameras_dict):
     return ET.tostring(root, encoding="utf8").decode("utf8")
 
 
-def _sample_camera_variation_pose(base_pos, base_quat, seed, variation_id, translate_range, rot_range_deg):
-    rng = np.random.default_rng(seed + variation_id)
-    delta_pos = rng.uniform(-translate_range, translate_range, size=3)
-    delta_rpy_deg = rng.uniform(-rot_range_deg, rot_range_deg, size=3)
-    delta_quat = _euler_to_quat_wxyz(*np.deg2rad(delta_rpy_deg))
-    pos = np.asarray(base_pos, dtype=np.float64) + delta_pos
-    quat = _quat_normalize_wxyz(
-        _quat_multiply_wxyz(np.asarray(base_quat, dtype=np.float64), delta_quat)
-    )
-    return {
-        "variation_id": variation_id,
-        "delta_pos": delta_pos,
-        "delta_rpy_deg": delta_rpy_deg,
-        "applied_pos": pos,
-        "applied_quat": quat,
-    }
+def _resolve_eef_target_pos_for_dataset(f, ep_name, target_request, env=None):
+    ep_grp = f[f"data/{ep_name}"]
+    offset = np.asarray(target_request["offset"], dtype=np.float64)
+    state_index = int(target_request["state_index"])
+
+    if "obs" in ep_grp and "ee_pos" in ep_grp["obs"]:
+        ee_pos = ep_grp["obs"]["ee_pos"][()]
+        if len(ee_pos) == 0:
+            raise ValueError(f"Episode {ep_name} has empty obs/ee_pos")
+        if state_index < 0:
+            state_index += len(ee_pos)
+        state_index = max(0, min(state_index, len(ee_pos) - 1))
+        return np.asarray(ee_pos[state_index], dtype=np.float64) + offset
+
+    if env is None:
+        raise ValueError("orbit_lookat target source 'eef_pos' requires env fallback, but env is None")
+
+    states = ep_grp["states"][()]
+    if len(states) == 0:
+        raise ValueError(f"Episode {ep_name} has empty states")
+    if state_index < 0:
+        state_index += len(states)
+    state_index = max(0, min(state_index, len(states) - 1))
+
+    model_xml = ep_grp.attrs["model_file"]
+    xml_override = _postprocess_model_xml_for_dataset(model_xml, {})
+
+    reset_success = False
+    while not reset_success:
+        try:
+            env.reset()
+            reset_success = True
+        except Exception:
+            continue
+    env.reset_from_xml_string(xml_override)
+    env.sim.reset()
+    env.sim.set_state_from_flattened(states[state_index])
+    env.sim.forward()
+    env._post_process()
+    env._update_observables(force=True)
+    obs = env._get_observations()
+    if "robot0_eef_pos" not in obs:
+        raise ValueError("Cannot resolve eef target position from environment observations")
+    return np.asarray(obs["robot0_eef_pos"], dtype=np.float64) + offset
+
+
+def _reset_env_with_xml_and_state_for_dataset(env, model_xml, state, cameras_dict):
+    xml_override = _postprocess_model_xml_for_dataset(model_xml, cameras_dict)
+    reset_success = False
+    while not reset_success:
+        try:
+            env.reset()
+            reset_success = True
+        except Exception:
+            continue
+    env.reset_from_xml_string(xml_override)
+    env.sim.reset()
+    env.sim.set_state_from_flattened(state)
+    env.sim.forward()
+    env._post_process()
+    env._update_observables(force=True)
+    return env._get_observations()
 
 
 def main():
@@ -148,8 +164,13 @@ def main():
     parser.add_argument("--camera-variation-rot-range-deg", type=float, default=8.0)
     parser.add_argument("--camera-variation-output-dir", type=str, default=None)
     parser.add_argument("--camera-variation-name-prefix", type=str, default=None)
+    parser.add_argument("--camera-variation-config", type=str, default=None)
 
     args = parser.parse_args()
+    camera_variation_cfg = camvar_cfg.load_camera_variation_config(args.camera_variation_config)
+    effective_camera_variation_count = camvar_cfg.get_effective_count(
+        args.camera_variation_count, camera_variation_cfg
+    )
 
     if args.camera_variation_count < 0:
         parser.error("--camera-variation-count must be >= 0")
@@ -157,8 +178,8 @@ def main():
         parser.error("--camera-variation-translate-range must be >= 0")
     if args.camera_variation_rot_range_deg < 0:
         parser.error("--camera-variation-rot-range-deg must be >= 0")
-    if args.camera_variation_count > 0 and not args.use_camera_obs:
-        parser.error("--camera-variation-count > 0 requires --use-camera-obs")
+    if effective_camera_variation_count > 0 and not args.use_camera_obs:
+        parser.error("camera variation generation requires --use-camera-obs")
     hdf5_path = args.demo_file
     f = h5py.File(hdf5_path, "r")
     env_name = f["data"].attrs.get("env", f["data"].attrs.get("env_name"))
@@ -177,9 +198,7 @@ def main():
             env_name = env_args_json.get("env_name")
 
     problem_info = json.loads(_as_text(f["data"].attrs["problem_info"]))
-    problem_info["domain_name"]
     problem_name = problem_info["problem_name"]
-    language_instruction = problem_info["language_instruction"]
 
     # list of all demonstrations episodes
     demos = list(f["data"].keys())
@@ -188,83 +207,6 @@ def main():
 
     bddl_file_dir = os.path.dirname(bddl_file_name)
     default_hdf5_path = os.path.join(get_libero_path("datasets"), bddl_file_dir.split("bddl_files/")[-1].replace(".bddl", "_demo.hdf5"))
-
-    camera_variation_specs = []
-    if args.camera_variation_count > 0:
-        if len(demos) == 0:
-            raise ValueError("Input demo file does not contain any episodes under /data")
-
-        first_model_xml = f["data/{}".format(demos[0])].attrs["model_file"]
-        base_pos, base_quat = _extract_camera_pose_from_xml(
-            first_model_xml, "agentview"
-        )
-        print(
-            "[camera-variation] base pose",
-            "camera=agentview",
-            f"pos={base_pos.tolist()}",
-            f"quat={base_quat.tolist()}",
-        )
-
-        output_dir = Path(args.camera_variation_output_dir) if args.camera_variation_output_dir else Path(default_hdf5_path).parent
-        output_dir.mkdir(parents=True, exist_ok=True)
-        output_prefix = args.camera_variation_name_prefix or Path(default_hdf5_path).stem
-
-        output_paths = []
-        for variation_id in range(args.camera_variation_count):
-            pose = _sample_camera_variation_pose(
-                base_pos=base_pos,
-                base_quat=base_quat,
-                seed=args.camera_variation_seed,
-                variation_id=variation_id,
-                translate_range=args.camera_variation_translate_range,
-                rot_range_deg=args.camera_variation_rot_range_deg,
-            )
-            output_path = output_dir / f"{output_prefix}_camvar_{variation_id:02d}.hdf5"
-            output_paths.append(output_path)
-            camera_variation_specs.append(
-                {
-                    "output_path": str(output_path),
-                    "cameras_dict": {
-                        "agentview": {
-                            "pos": " ".join(
-                                f"{float(v):.10f}" for v in pose["applied_pos"]
-                            ),
-                            "quat": " ".join(
-                                f"{float(v):.10f}" for v in pose["applied_quat"]
-                            ),
-                        }
-                    },
-                    "pose": pose,
-                    "base_pos": base_pos,
-                    "base_quat": base_quat,
-                }
-            )
-            print(
-                "[camera-variation]",
-                f"id={variation_id}",
-                f"pos={pose['applied_pos'].tolist()}",
-                f"quat={pose['applied_quat'].tolist()}",
-                f"delta_pos={pose['delta_pos'].tolist()}",
-                f"delta_rpy_deg={pose['delta_rpy_deg'].tolist()}",
-            )
-
-        collisions = [str(path) for path in output_paths if path.exists()]
-        if collisions:
-            raise FileExistsError(
-                "Refusing to overwrite existing camera variation files:\n" + "\n".join(collisions)
-            )
-    else:
-        output_parent_dir = Path(default_hdf5_path).parent
-        output_parent_dir.mkdir(parents=True, exist_ok=True)
-        camera_variation_specs.append(
-            {
-                "output_path": default_hdf5_path,
-                "cameras_dict": {},
-                "pose": None,
-                "base_pos": None,
-                "base_quat": None,
-            }
-        )
 
     libero_utils.update_env_kwargs(
         env_kwargs,
@@ -289,6 +231,123 @@ def main():
         **env_kwargs,
     )
 
+    env_args = {
+        "type": 1,
+        "env_name": env_name,
+        "problem_name": problem_name,
+        "bddl_file": _as_text(f["data"].attrs["bddl_file_name"]),
+        "env_kwargs": env_kwargs,
+    }
+
+    camera_variation_specs = []
+    if effective_camera_variation_count > 0:
+        if len(demos) == 0:
+            raise ValueError("Input demo file does not contain any episodes under /data")
+
+        first_model_xml = f["data/{}".format(demos[0])].attrs["model_file"]
+        base_pos, base_quat = _extract_camera_pose_from_xml(
+            first_model_xml, "agentview"
+        )
+        print(
+            "[camera-variation] base pose",
+            "camera=agentview",
+            f"pos={base_pos.tolist()}",
+            f"quat={base_quat.tolist()}",
+        )
+
+        target_pos = None
+        if camvar_cfg.needs_target_pos(camera_variation_cfg):
+            target_request = camvar_cfg.get_target_request(camera_variation_cfg)
+            if target_request["source"] == "eef_pos":
+                target_pos = _resolve_eef_target_pos_for_dataset(
+                    f, demos[0], target_request, env=env
+                )
+            elif target_request["source"] == "fixed_world":
+                if target_request["position"] is None:
+                    raise ValueError("camera variation config target.position is required for fixed_world")
+                target_pos = np.asarray(target_request["position"], dtype=np.float64) + np.asarray(
+                    target_request["offset"], dtype=np.float64
+                )
+            else:
+                raise ValueError(f"Unsupported target source: {target_request['source']}")
+            print("[camera-variation] target_pos", target_pos.tolist())
+
+        poses = camvar_cfg.generate_camera_variation_poses(
+            base_pos=base_pos,
+            base_quat=base_quat,
+            count=effective_camera_variation_count,
+            seed=args.camera_variation_seed,
+            translate_range=args.camera_variation_translate_range,
+            rot_range_deg=args.camera_variation_rot_range_deg,
+            cfg=camera_variation_cfg,
+            target_pos=target_pos,
+            validator=camera_visibility.make_pose_validator(
+                env=env,
+                model_xml=first_model_xml,
+                states=f["data/{}".format(demos[0])]["states"][()],
+                reset_fn=_reset_env_with_xml_and_state_for_dataset,
+                cfg=camera_variation_cfg,
+                camera_name="agentview",
+            )
+            if camera_visibility.constraints_enabled(camera_variation_cfg)
+            else None,
+        )
+
+        output_dir = Path(args.camera_variation_output_dir) if args.camera_variation_output_dir else Path(default_hdf5_path).parent
+        output_dir.mkdir(parents=True, exist_ok=True)
+        output_prefix = args.camera_variation_name_prefix or Path(default_hdf5_path).stem
+
+        output_paths = []
+        for pose in poses:
+            variation_id = int(pose["variation_id"])
+            output_path = output_dir / f"{output_prefix}_camvar_{variation_id:02d}.hdf5"
+            output_paths.append(output_path)
+            camera_variation_specs.append(
+                {
+                    "output_path": str(output_path),
+                    "cameras_dict": {
+                        "agentview": {
+                            "pos": " ".join(
+                                f"{float(v):.10f}" for v in pose["applied_pos"]
+                            ),
+                            "quat": " ".join(
+                                f"{float(v):.10f}" for v in pose["applied_quat"]
+                            ),
+                        }
+                    },
+                    "pose": pose,
+                    "base_pos": base_pos,
+                    "base_quat": base_quat,
+                }
+            )
+            print(
+                "[camera-variation]",
+                f"id={variation_id}",
+                f"strategy={pose.get('strategy', 'random_local')}",
+                f"pos={pose['applied_pos'].tolist()}",
+                f"quat={pose['applied_quat'].tolist()}",
+                f"delta_pos={pose['delta_pos'].tolist()}",
+                f"delta_rpy_deg={pose['delta_rpy_deg'].tolist()}",
+            )
+
+        collisions = [str(path) for path in output_paths if path.exists()]
+        if collisions:
+            raise FileExistsError(
+                "Refusing to overwrite existing camera variation files:\n" + "\n".join(collisions)
+            )
+    else:
+        output_parent_dir = Path(default_hdf5_path).parent
+        output_parent_dir.mkdir(parents=True, exist_ok=True)
+        camera_variation_specs.append(
+            {
+                "output_path": default_hdf5_path,
+                "cameras_dict": {},
+                "pose": None,
+                "base_pos": None,
+                "base_quat": None,
+            }
+        )
+
     for camera_variation_spec in camera_variation_specs:
         hdf5_path = camera_variation_spec["output_path"]
         cameras_dict = camera_variation_spec["cameras_dict"]
@@ -306,13 +365,14 @@ def main():
 
         grp.attrs["bddl_file_name"] = bddl_file_name
         grp.attrs["bddl_file_content"] = open(bddl_file_name, "r").read()
-        print(grp.attrs["bddl_file_content"])
 
         if pose is not None:
             grp.attrs["camera_variation_enabled"] = True
             grp.attrs["camera_variation_id"] = int(pose["variation_id"])
             grp.attrs["camera_variation_seed"] = int(args.camera_variation_seed)
             grp.attrs["camera_variation_target_camera"] = "agentview"
+            if camera_variation_cfg is not None:
+                grp.attrs["camera_variation_config"] = json.dumps(camera_variation_cfg)
             grp.attrs["camera_variation_base_pos"] = json.dumps(base_pos.tolist())
             grp.attrs["camera_variation_base_quat"] = json.dumps(base_quat.tolist())
             grp.attrs["camera_variation_applied_pos"] = json.dumps(pose["applied_pos"].tolist())
@@ -320,16 +380,7 @@ def main():
             grp.attrs["camera_variation_translate_range"] = float(args.camera_variation_translate_range)
             grp.attrs["camera_variation_rot_range_deg"] = float(args.camera_variation_rot_range_deg)
 
-            env_args = {
-                "type": 1,
-                "env_name": env_name,
-                "problem_name": problem_name,
-                "bddl_file": _as_text(f["data"].attrs["bddl_file_name"]),
-                "env_kwargs": env_kwargs,
-            }
-
         grp.attrs["env_args"] = json.dumps(env_args)
-        print(grp.attrs["env_args"])
         total_len = 0
         demos = demos
 
