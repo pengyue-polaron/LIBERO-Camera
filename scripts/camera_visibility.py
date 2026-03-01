@@ -70,12 +70,41 @@ def _point_in_image(pt, image_h, image_w, margin_px):
     return margin_px <= x < (image_w - margin_px) and margin_px <= y < (image_h - margin_px)
 
 
-def _body_pos_if_exists(sim, body_name):
+def _body_visibility_points_if_exists(sim, body_name):
+    """Approximate object extent points for visibility checks.
+
+    We build a small point cloud from body center plus +/- axis offsets using a
+    radius estimated from geoms attached to the body.
+    """
     try:
         body_id = sim.model.body_name2id(body_name)
     except Exception:
         return None
-    return np.asarray(sim.data.body_xpos[body_id], dtype=np.float64)
+
+    center = np.asarray(sim.data.body_xpos[body_id], dtype=np.float64)
+    rot = np.asarray(sim.data.body_xmat[body_id], dtype=np.float64).reshape(3, 3)
+
+    geom_ids = np.where(np.asarray(sim.model.geom_bodyid) == body_id)[0]
+    if len(geom_ids) == 0:
+        radius = 0.03
+    else:
+        geom_sizes = np.asarray(sim.model.geom_size[geom_ids], dtype=np.float64)
+        radius = float(np.max(np.linalg.norm(geom_sizes, axis=1)))
+        radius = max(radius, 0.02)
+
+    local = np.array(
+        [
+            [0.0, 0.0, 0.0],
+            [radius, 0.0, 0.0],
+            [-radius, 0.0, 0.0],
+            [0.0, radius, 0.0],
+            [0.0, -radius, 0.0],
+            [0.0, 0.0, radius],
+            [0.0, 0.0, -radius],
+        ],
+        dtype=np.float64,
+    )
+    return center[None, :] + local @ rot.T
 
 
 def _site_corners_if_exists(sim, site_name):
@@ -142,6 +171,8 @@ def make_pose_validator(
     require_goal_region_visible = bool(vc.get("require_goal_region_visible", True))
     require_obj_of_interest_visible = bool(vc.get("require_obj_of_interest_visible", True))
     require_eef_visible = bool(vc.get("require_eef_visible", True))
+    min_obj_visible_fraction = float(vc.get("min_obj_visible_fraction", 0.75))
+    min_goal_bbox_area_ratio = float(vc.get("min_goal_bbox_area_ratio", 0.002))
     obj_names = list(getattr(env, "parsed_problem", {}).get("obj_of_interest", []))
     goal_regions = _collect_goal_regions(getattr(env, "parsed_problem", {}))
     state_indices = get_check_state_indices(len(states), cfg)
@@ -169,19 +200,24 @@ def make_pose_validator(
 
             if require_obj_of_interest_visible:
                 for obj_name in obj_names:
-                    pos = _body_pos_if_exists(env.sim, obj_name)
-                    if pos is None:
+                    points = _body_visibility_points_if_exists(env.sim, obj_name)
+                    if points is None:
                         continue
                     pixels, visible = _project_world_points_to_pixels(
                         env.sim,
                         camera_name,
-                        np.asarray([pos], dtype=np.float64),
+                        points,
                         image_h,
                         image_w,
                     )
-                    if not visible or pixels[0] is None or not _point_in_image(
-                        pixels[0], image_h, image_w, margin_px
-                    ):
+                    if not visible:
+                        return False
+                    inside = [
+                        (p is not None) and _point_in_image(p, image_h, image_w, margin_px)
+                        for p in pixels
+                    ]
+                    visible_fraction = float(np.mean(inside))
+                    if visible_fraction < min_obj_visible_fraction:
                         return False
 
             if require_goal_region_visible:
@@ -195,6 +231,14 @@ def make_pose_validator(
                     if not visible or any(p is None for p in pixels):
                         return False
                     if not all(_point_in_image(p, image_h, image_w, margin_px) for p in pixels):
+                        return False
+                    xs = [p[0] for p in pixels]
+                    ys = [p[1] for p in pixels]
+                    bbox_area = max(0.0, (max(xs) - min(xs)) * (max(ys) - min(ys)))
+                    image_area = float(image_h * image_w)
+                    if image_area <= 0:
+                        return False
+                    if (bbox_area / image_area) < min_goal_bbox_area_ratio:
                         return False
 
         return True

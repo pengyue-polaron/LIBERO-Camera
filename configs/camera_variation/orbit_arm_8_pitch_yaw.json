@@ -10,27 +10,36 @@
     "angles_relative_to_base": true,
     "yaw_deg": {
       "type": "linspace",
-      "start": -65.0,
-      "stop": 65.0
+      "start": -95.0,
+      "stop": 95.0
     },
     "pitch_deg": {
       "type": "linspace",
-      "start": -16.0,
-      "stop": -2.0
+      "start": -24.0,
+      "stop": 6.0
     },
-    "radius_scale": 1.0,
+    "radius_scale": {
+      "type": "linspace",
+      "start": 0.95,
+      "stop": 1.35
+    },
     "radius_offset": 0.0,
-    "radius_offset_per_abs_yaw_deg": 0.003,
-    "radius_offset_per_abs_pitch_deg": 0.0,
+    "radius_offset_per_abs_yaw_deg": 0.005,
+    "radius_offset_per_abs_pitch_deg": 0.002,
     "up_ref": [0.0, 0.0, 1.0]
+  },
+  "selection": {
+    "mode": "diverse_fps"
   },
   "visibility_constraints": {
     "enabled": true,
     "check_frames": [0.0],
     "require_goal_region_visible": true,
-    "require_obj_of_interest_visible": false,
+    "require_obj_of_interest_visible": true,
     "require_eef_visible": true,
-    "pixel_margin": 2,
+    "pixel_margin": 16,
+    "min_obj_visible_fraction": 0.75,
+    "min_goal_bbox_area_ratio": 0.002,
     "candidate_pool_factor": 12,
     "max_sampling_trials": 180,
     "fallback": "unfiltered"

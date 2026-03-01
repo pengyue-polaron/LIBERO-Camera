@@ -343,6 +343,51 @@ def _choose_evenly(accepted, target_count):
     return selected
 
 
+def _pose_feature_vector(pose):
+    if "orbit_yaw_deg" in pose:
+        return np.array(
+            [
+                float(pose.get("orbit_yaw_deg", 0.0)),
+                float(pose.get("orbit_pitch_deg", 0.0)),
+                float(pose.get("orbit_radius", 0.0)),
+            ],
+            dtype=np.float64,
+        )
+    delta_pos = np.asarray(pose.get("delta_pos", [0.0, 0.0, 0.0]), dtype=np.float64)
+    delta_rpy = np.asarray(pose.get("delta_rpy_deg", [0.0, 0.0, 0.0]), dtype=np.float64)
+    return np.concatenate([delta_pos, delta_rpy], axis=0)
+
+
+def _choose_diverse_fps(accepted, target_count):
+    if len(accepted) < target_count:
+        raise ValueError(
+            f"Only found {len(accepted)} valid camera poses, but need {target_count}"
+        )
+    if len(accepted) == target_count:
+        return list(accepted)
+
+    feats = np.stack([_pose_feature_vector(p) for p in accepted], axis=0)
+    std = np.std(feats, axis=0)
+    std[std < 1e-9] = 1.0
+    feats = (feats - np.mean(feats, axis=0)) / std
+
+    seed_idx = int(np.argmax(np.linalg.norm(feats, axis=1)))
+    selected = [seed_idx]
+    min_dists = np.linalg.norm(feats - feats[seed_idx : seed_idx + 1], axis=1)
+
+    while len(selected) < target_count:
+        min_dists[selected] = -1.0
+        next_idx = int(np.argmax(min_dists))
+        selected.append(next_idx)
+        d = np.linalg.norm(feats - feats[next_idx : next_idx + 1], axis=1)
+        min_dists = np.minimum(min_dists, d)
+
+    selected = sorted(set(selected))
+    while len(selected) > target_count:
+        selected.pop()
+    return [accepted[i] for i in selected]
+
+
 def generate_camera_variation_poses(
     base_pos,
     base_quat,
@@ -433,7 +478,14 @@ def generate_camera_variation_poses(
             f"fallback='{fallback_mode}', final={len(selected)}"
         )
     else:
-        selected = _choose_evenly(accepted, count)
+        selection_cfg = (cfg or {}).get("selection", {})
+        selection_mode = str(selection_cfg.get("mode", "diverse_fps")).lower()
+        if selection_mode == "diverse_fps":
+            selected = _choose_diverse_fps(accepted, count)
+        elif selection_mode == "evenly":
+            selected = _choose_evenly(accepted, count)
+        else:
+            raise ValueError(f"Unsupported selection mode: {selection_mode}")
     for new_id, pose in enumerate(selected):
         pose["candidate_variation_id"] = int(pose["variation_id"])
         pose["variation_id"] = new_id
@@ -451,21 +503,26 @@ def default_example_config():
         },
         "orbit": {
             "angles_relative_to_base": True,
-            "yaw_deg": {"type": "linspace", "start": -65.0, "stop": 65.0},
-            "pitch_deg": {"type": "linspace", "start": -16.0, "stop": -2.0},
-            "radius_scale": 1.0,
+            "yaw_deg": {"type": "linspace", "start": -95.0, "stop": 95.0},
+            "pitch_deg": {"type": "linspace", "start": -24.0, "stop": 6.0},
+            "radius_scale": {"type": "linspace", "start": 0.95, "stop": 1.35},
             "radius_offset": 0.0,
-            "radius_offset_per_abs_yaw_deg": 0.003,
-            "radius_offset_per_abs_pitch_deg": 0.0,
+            "radius_offset_per_abs_yaw_deg": 0.005,
+            "radius_offset_per_abs_pitch_deg": 0.002,
             "up_ref": [0.0, 0.0, 1.0],
+        },
+        "selection": {
+            "mode": "diverse_fps"
         },
         "visibility_constraints": {
             "enabled": True,
             "check_frames": [0.0],
             "require_goal_region_visible": True,
-            "require_obj_of_interest_visible": False,
+            "require_obj_of_interest_visible": True,
             "require_eef_visible": True,
-            "pixel_margin": 2,
+            "pixel_margin": 16,
+            "min_obj_visible_fraction": 0.75,
+            "min_goal_bbox_area_ratio": 0.002,
             "candidate_pool_factor": 12,
             "max_sampling_trials": 180,
             "fallback": "unfiltered",
