@@ -155,6 +155,8 @@ def _create_cmd(args, src_hdf5, dst_dir, name_prefix):
         "--camera-variation-name-prefix",
         name_prefix,
     ]
+    if args.camera_variation_uid_in_filename:
+        cmd.append("--camera-variation-uid-in-filename")
     if args.resume:
         cmd.append("--resume")
     return cmd
@@ -171,6 +173,17 @@ def main():
     parser.add_argument("--preview-output-dir", required=True)
     parser.add_argument("--dataset-camera-root", required=True)
     parser.add_argument("--camera-variation-config", default=str(DEFAULT_CONFIG))
+    parser.add_argument(
+        "--camera-variation-uid-in-filename",
+        dest="camera_variation_uid_in_filename",
+        action="store_true",
+        help="Append a short stable UID to each generated camera-variation HDF5 filename.",
+    )
+    parser.add_argument(
+        "--no-camera-variation-uid-in-filename",
+        dest="camera_variation_uid_in_filename",
+        action="store_false",
+    )
     parser.add_argument("--episode", type=str, default="demo_0")
     parser.add_argument("--file-pattern", type=str, default="*.hdf5")
     parser.add_argument(
@@ -219,7 +232,7 @@ def main():
     parser.add_argument("--grid-only", dest="grid_only", action="store_true")
     parser.add_argument("--no-grid-only", dest="grid_only", action="store_false")
     parser.add_argument("--grid-cell-size", type=int, default=128)
-    parser.add_argument("--grid-cols", type=int, default=5)
+    parser.add_argument("--grid-cols", type=int, default=4)
     parser.add_argument("--exclude-original-view", action="store_true")
     parser.set_defaults(
         draw_bddl_regions=True,
@@ -230,6 +243,7 @@ def main():
         include_original_hdf5=True,
         resume=True,
         continue_on_error=True,
+        camera_variation_uid_in_filename=True,
     )
     args = parser.parse_args()
 

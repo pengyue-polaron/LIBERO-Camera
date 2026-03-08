@@ -449,7 +449,9 @@ def _make_collage(images, labels, out_path):
     canvas.save(out_path)
 
 
-_CAMVAR_FILE_RE = re.compile(r"^(?P<base>.+)_camvar_(?P<id>\d+)\.hdf5$")
+_CAMVAR_FILE_RE = re.compile(
+    r"^(?P<base>.+)_camvar_(?P<id>\d+)(?:_(?P<uid>[A-Za-z0-9]+))?\.hdf5$"
+)
 
 
 def _collect_variation_groups(root_dir):
@@ -461,9 +463,9 @@ def _collect_variation_groups(root_dir):
             continue
         rel_parent = path.parent.relative_to(root_dir)
         key = (str(rel_parent), m.group("base"))
-        groups.setdefault(key, []).append((int(m.group("id")), path))
+        groups.setdefault(key, []).append((int(m.group("id")), m.group("uid"), path))
     for key in groups:
-        groups[key] = sorted(groups[key], key=lambda x: x[0])
+        groups[key] = sorted(groups[key], key=lambda x: (x[0], x[2].name))
     return groups
 
 
@@ -550,7 +552,7 @@ def _render_dataset_folder_collages(
 ):
     groups = _collect_variation_groups(variation_root)
     if not groups:
-        raise ValueError(f"No '*_camvar_XX.hdf5' files found under {variation_root}")
+        raise ValueError(f"No camera-variation HDF5 files found under {variation_root}")
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -559,7 +561,7 @@ def _render_dataset_folder_collages(
     for (rel_parent, base_name), items in sorted(groups.items()):
         images = []
         labels = []
-        for camvar_id, path in items:
+        for camvar_id, camvar_uid, path in items:
             try:
                 if draw_bddl_regions:
                     img = _extract_hdf5_rgb_frame_with_region_overlay(
@@ -578,7 +580,10 @@ def _render_dataset_folder_collages(
                 print(f"[replay] skip {path}: {e}")
                 continue
             images.append(img)
-            labels.append(f"camvar_{camvar_id:02d}")
+            label = f"camvar_{camvar_id:02d}"
+            if camvar_uid:
+                label = f"{label}_{camvar_uid}"
+            labels.append(label)
 
         if not images:
             print(f"[replay] skip group {base_name}: no readable variation files")
@@ -604,7 +609,7 @@ def main():
         "--variation-root",
         type=str,
         default=None,
-        help="Only used in dataset-folder-collage mode. Root directory containing *_camvar_XX.hdf5 files.",
+        help="Only used in dataset-folder-collage mode. Root directory containing camera-variation HDF5 files.",
     )
     parser.add_argument("--bddl-file-override", type=str, default=None)
     parser.add_argument("--episode", type=str, default="demo_0")
@@ -620,7 +625,7 @@ def main():
         default=None,
         help="Optional action index for display / selecting state (uses state[action_index+1]).",
     )
-    parser.add_argument("--camera-variation-count", type=int, default=8)
+    parser.add_argument("--camera-variation-count", type=int, default=0)
     parser.add_argument("--camera-variation-seed", type=int, default=0)
     parser.add_argument("--translate-range", type=float, default=0.05)
     parser.add_argument("--rot-range-deg", type=float, default=8.0)
@@ -635,7 +640,7 @@ def main():
             "screenshot: one state across camera variations; "
             "video: replay action sequence for each camera variation; "
             "dataset-video: strictly encode stored HDF5 obs frames into video; "
-            "dataset-folder-collage: traverse a folder of *_camvar_XX.hdf5 and make one collage per source"
+            "dataset-folder-collage: traverse a folder of camera-variation HDF5 files and make one collage per source"
         ),
     )
     parser.add_argument(
@@ -660,6 +665,8 @@ def main():
     parser.add_argument("--fps", type=int, default=20)
     parser.add_argument("--output-dir", type=str, default="camera_variation_replay")
     parser.add_argument("--output-prefix", type=str, default=None)
+    parser.add_argument("--include-original-view", dest="include_original_view", action="store_true")
+    parser.add_argument("--exclude-original-view", dest="include_original_view", action="store_false")
     parser.add_argument(
         "--draw-bddl-regions",
         action="store_true",
@@ -670,6 +677,7 @@ def main():
         action="store_true",
         help="Only used with --draw-bddl-regions. Draw region boxes without text labels.",
     )
+    parser.set_defaults(include_original_view=True)
     args = parser.parse_args()
     camera_variation_cfg = camvar_cfg.load_camera_variation_config(args.camera_variation_config)
     effective_camera_variation_count = camvar_cfg.get_effective_count(
@@ -810,14 +818,17 @@ def main():
             poses = []
             for cfg_pose in cfg_poses:
                 idx = int(cfg_pose["variation_id"])
+                uid = camvar_cfg.build_camera_variation_uid(args.demo_file, idx, cfg_pose)
                 pose = {
+                    "variation_id": idx,
+                    "variation_uid": uid,
                     "pos": np.asarray(cfg_pose["applied_pos"], dtype=np.float64),
                     "quat": np.asarray(cfg_pose["applied_quat"], dtype=np.float64),
                     "delta_pos": np.asarray(cfg_pose["delta_pos"], dtype=np.float64),
                     "delta_rpy_deg": np.asarray(cfg_pose["delta_rpy_deg"], dtype=np.float64),
                 }
                 print(
-                    f"[replay] camvar_{idx:02d} "
+                    f"[replay] {uid} "
                     f"strategy={cfg_pose.get('strategy', 'random_local')} "
                     f"delta_pos={pose['delta_pos'].tolist()} "
                     f"delta_rpy_deg={pose['delta_rpy_deg'].tolist()}"
@@ -828,6 +839,26 @@ def main():
                 images = []
                 labels = []
                 state = states[state_index]
+                if args.include_original_view:
+                    img = _capture_image_at_state(
+                        env=env,
+                        model_xml=model_xml,
+                        state=state,
+                        cameras_dict={},
+                    )
+                    img = _maybe_flip_rgb_vertical(img, env_flip_vertical)
+                    if args.draw_bddl_regions:
+                        img = _draw_bddl_region_overlay(
+                            env,
+                            img,
+                            camera_name=args.target_camera,
+                            draw_labels=not args.hide_region_labels,
+                        )
+                    images.append(img)
+                    labels.append("original")
+                    out_file = output_dir / f"{prefix}_original.png"
+                    Image.fromarray(img).save(out_file)
+                    print(f"[replay] saved {out_file}")
                 for idx, pose in enumerate(poses):
                     cameras_dict = {
                         args.target_camera: {
@@ -850,8 +881,9 @@ def main():
                             draw_labels=not args.hide_region_labels,
                         )
                     images.append(img)
-                    labels.append(f"camvar_{idx:02d}")
-                    out_file = output_dir / f"{prefix}_camvar_{idx:02d}.png"
+                    label = pose["variation_uid"]
+                    labels.append(label)
+                    out_file = output_dir / f"{prefix}_camvar_{idx:02d}_{label.split('-')[0]}.png"
                     Image.fromarray(img).save(out_file)
                     print(f"[replay] saved {out_file}")
 

@@ -56,13 +56,16 @@ def _expected_output_paths(args, hdf5_path):
     rel_parent, stem = _build_output_prefix(Path(args.dataset_root), hdf5_path)
     output_parent = Path(args.output_dir) / rel_parent
     outputs = []
+    task_uid_prefix = camvar_cfg.build_camera_variation_task_uid_prefix(hdf5_path)
     if args.grid_video:
         outputs.append(output_parent / f"{stem}_{args.episode}_grid.mp4")
     if not args.grid_only:
         if args.include_original_view:
             outputs.append(output_parent / f"{stem}_{args.episode}_original.mp4")
         for variation_id in range(args.camera_variation_count):
-            outputs.append(output_parent / f"{stem}_{args.episode}_camvar_{variation_id:02d}.mp4")
+            outputs.append(
+                output_parent / f"{stem}_{args.episode}_camvar_{variation_id:02d}_{task_uid_prefix}.mp4"
+            )
     return output_parent, outputs
 
 
@@ -277,13 +280,15 @@ def _render_variation_videos_for_file(hdf5_path, args):
 
             for pose in poses:
                 variation_id = int(pose["variation_id"])
+                variation_uid = camvar_cfg.build_camera_variation_uid(hdf5_path, variation_id, pose)
+                task_uid_prefix = camvar_cfg.build_camera_variation_task_uid_prefix(hdf5_path)
                 cameras_dict = {
                     "agentview": {
                         "pos": replay_utils._float_list_to_str(pose["applied_pos"]),
                         "quat": replay_utils._float_list_to_str(pose["applied_quat"]),
                     }
                 }
-                label = f"camvar_{variation_id:02d}"
+                label = variation_uid
 
                 if args.grid_video:
                     frames = _render_frames_for_variation(
@@ -303,7 +308,7 @@ def _render_variation_videos_for_file(hdf5_path, args):
                     n_frames = len(action_slice) + 1
 
                 if not args.grid_only:
-                    out_file = output_parent / f"{stem}_{args.episode}_camvar_{variation_id:02d}.mp4"
+                    out_file = output_parent / f"{stem}_{args.episode}_camvar_{variation_id:02d}_{task_uid_prefix}.mp4"
                     if args.resume and out_file.exists():
                         print(f"[batch-preview] resume skip existing: {out_file}")
                     else:
@@ -426,7 +431,7 @@ def main():
     parser.add_argument("--grid-only", dest="grid_only", action="store_true")
     parser.add_argument("--no-grid-only", dest="grid_only", action="store_false")
     parser.add_argument("--grid-cell-size", type=int, default=128)
-    parser.add_argument("--grid-cols", type=int, default=5)
+    parser.add_argument("--grid-cols", type=int, default=4)
     parser.add_argument("--include-original-view", dest="include_original_view", action="store_true")
     parser.add_argument("--exclude-original-view", dest="include_original_view", action="store_false")
     parser.add_argument("--hide-video-labels", dest="hide_video_labels", action="store_true")

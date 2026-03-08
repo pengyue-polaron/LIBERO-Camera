@@ -1,9 +1,20 @@
 import json
 import math
+import hashlib
 from pathlib import Path
 
 import numpy as np
 import camera_visibility
+
+
+def build_camera_variation_task_uid_prefix(source_id):
+    digest = hashlib.sha1()
+    digest.update(str(Path(source_id).resolve()).encode("utf-8"))
+    return f"t{digest.hexdigest()[:6]}"
+
+
+def build_camera_variation_uid(source_id, variation_id, pose=None):
+    return f"{build_camera_variation_task_uid_prefix(source_id)}-{int(variation_id):02d}"
 
 
 def load_camera_variation_config(path):
@@ -543,37 +554,24 @@ def generate_camera_variation_poses(
 def default_example_config():
     return {
         "strategy": "orbit_lookat",
-        "count": 5,
+        "count": 7,
         "target": {
             "source": "eef_pos",
             "state_index": 0,
-            "offset": [0.0, 0.0, 0.05],
+            "offset": [0.0, 0.0, 0.08],
         },
         "orbit": {
             "angles_relative_to_base": True,
-            "yaw_deg": {"type": "linspace", "start": -95.0, "stop": 95.0},
-            "pitch_deg": {"type": "linspace", "start": -24.0, "stop": 6.0},
-            "radius_scale": {"type": "linspace", "start": 0.95, "stop": 1.35},
-            "radius_offset": 0.0,
-            "radius_offset_per_abs_yaw_deg": 0.005,
-            "radius_offset_per_abs_pitch_deg": 0.002,
+            "yaw_deg": [-55.0, -36.0, -18.0, 0.0, 18.0, 36.0, 55.0],
+            "pitch_deg": [8.0, 10.0, 13.0, 16.0, 13.0, 10.0, 8.0],
+            "radius_scale": [1.18, 1.12, 1.06, 1.0, 1.06, 1.12, 1.18],
+            "radius_offset": 0.07,
+            "radius_offset_per_abs_yaw_deg": 0.0,
+            "radius_offset_per_abs_pitch_deg": 0.0,
             "up_ref": [0.0, 0.0, 1.0],
         },
-        "selection": {
-            "mode": "diverse_fps"
-        },
         "visibility_constraints": {
-            "enabled": True,
-            "check_frames": [0.0],
-            "require_goal_region_visible": True,
-            "require_obj_of_interest_visible": True,
-            "require_eef_visible": True,
-            "pixel_margin": 16,
-            "min_obj_visible_fraction": 0.75,
-            "min_goal_bbox_area_ratio": 0.002,
-            "candidate_pool_factor": 12,
-            "max_sampling_trials": 180,
-            "fallback": "unfiltered",
+            "enabled": False,
         },
     }
 

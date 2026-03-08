@@ -65,6 +65,13 @@ def _postprocess_model_xml_for_dataset(model_xml, cameras_dict):
 
     return ET.tostring(root, encoding="utf8").decode("utf8")
 
+def _existing_camera_variation_paths(output_dir, output_prefix, variation_id):
+    output_dir = Path(output_dir)
+    base_name = f"{output_prefix}_camvar_{variation_id:02d}"
+    matches = [output_dir / f"{base_name}.hdf5"]
+    matches.extend(sorted(output_dir.glob(f"{base_name}_*.hdf5")))
+    return [path for path in matches if path.exists()]
+
 
 def _resolve_eef_target_pos_for_dataset(f, ep_name, target_request, env=None):
     ep_grp = f[f"data/{ep_name}"]
@@ -166,11 +173,23 @@ def main():
     parser.add_argument("--camera-variation-name-prefix", type=str, default=None)
     parser.add_argument("--camera-variation-config", type=str, default=None)
     parser.add_argument(
+        "--camera-variation-uid-in-filename",
+        dest="camera_variation_uid_in_filename",
+        action="store_true",
+        help="Append a short stable UID to each camera-variation HDF5 filename.",
+    )
+    parser.add_argument(
+        "--no-camera-variation-uid-in-filename",
+        dest="camera_variation_uid_in_filename",
+        action="store_false",
+    )
+    parser.add_argument(
         "--resume",
         action="store_true",
         help="Skip existing outputs and only generate missing files.",
     )
 
+    parser.set_defaults(camera_variation_uid_in_filename=True)
     args = parser.parse_args()
     camera_variation_cfg = camvar_cfg.load_camera_variation_config(args.camera_variation_config)
     effective_camera_variation_count = camvar_cfg.get_effective_count(
@@ -315,14 +334,22 @@ def main():
             else:
                 output_prefix = Path(_get_default_hdf5_path()).stem
 
-        output_paths = []
         for pose in poses:
             variation_id = int(pose["variation_id"])
-            output_path = output_dir / f"{output_prefix}_camvar_{variation_id:02d}.hdf5"
-            output_paths.append(output_path)
+            task_uid_prefix = camvar_cfg.build_camera_variation_task_uid_prefix(args.demo_file)
+            variation_uid = camvar_cfg.build_camera_variation_uid(args.demo_file, variation_id, pose)
+            output_name = f"{output_prefix}_camvar_{variation_id:02d}"
+            if args.camera_variation_uid_in_filename:
+                output_name = f"{output_name}_{task_uid_prefix}"
+            output_path = output_dir / f"{output_name}.hdf5"
             camera_variation_specs.append(
                 {
                     "output_path": str(output_path),
+                    "variation_id": variation_id,
+                    "output_dir": str(output_dir),
+                    "output_prefix": output_prefix,
+                    "task_uid_prefix": task_uid_prefix,
+                    "variation_uid": variation_uid,
                     "cameras_dict": {
                         "agentview": {
                             "pos": " ".join(
@@ -341,6 +368,8 @@ def main():
             print(
                 "[camera-variation]",
                 f"id={variation_id}",
+                f"task_uid_prefix={task_uid_prefix}",
+                f"uid={variation_uid}",
                 f"strategy={pose.get('strategy', 'random_local')}",
                 f"pos={pose['applied_pos'].tolist()}",
                 f"quat={pose['applied_quat'].tolist()}",
@@ -352,16 +381,28 @@ def main():
             kept_specs = []
             for spec in camera_variation_specs:
                 out_path = Path(spec["output_path"])
-                if out_path.exists():
-                    print(f"[camera-variation] resume skip existing: {out_path}")
+                existing_paths = _existing_camera_variation_paths(
+                    spec["output_dir"], spec["output_prefix"], spec["variation_id"]
+                )
+                if existing_paths:
+                    existing_display = ", ".join(str(p) for p in existing_paths)
+                    print(f"[camera-variation] resume skip existing: {existing_display}")
                     continue
                 kept_specs.append(spec)
             camera_variation_specs = kept_specs
         else:
-            collisions = [str(path) for path in output_paths if path.exists()]
+            collisions = []
+            for spec in camera_variation_specs:
+                collisions.extend(
+                    str(p)
+                    for p in _existing_camera_variation_paths(
+                        spec["output_dir"], spec["output_prefix"], spec["variation_id"]
+                    )
+                )
             if collisions:
                 raise FileExistsError(
-                    "Refusing to overwrite existing camera variation files:\n" + "\n".join(collisions)
+                    "Refusing to overwrite existing camera variation files:\n"
+                    + "\n".join(sorted(set(collisions)))
                 )
     else:
         default_hdf5_path = _get_default_hdf5_path()
@@ -375,6 +416,11 @@ def main():
         camera_variation_specs.append(
             {
                 "output_path": default_hdf5_path,
+                "variation_id": None,
+                "output_dir": None,
+                "output_prefix": None,
+                "task_uid_prefix": None,
+                "variation_uid": None,
                 "cameras_dict": {},
                 "pose": None,
                 "base_pos": None,
@@ -394,6 +440,8 @@ def main():
         pose = camera_variation_spec["pose"]
         base_pos = camera_variation_spec["base_pos"]
         base_quat = camera_variation_spec["base_quat"]
+        task_uid_prefix = camera_variation_spec["task_uid_prefix"]
+        variation_uid = camera_variation_spec["variation_uid"]
 
         h5py_f = h5py.File(hdf5_path, "w")
 
@@ -409,8 +457,12 @@ def main():
         if pose is not None:
             grp.attrs["camera_variation_enabled"] = True
             grp.attrs["camera_variation_id"] = int(pose["variation_id"])
+            grp.attrs["camera_variation_task_uid_prefix"] = task_uid_prefix
+            grp.attrs["camera_variation_uid"] = variation_uid
             grp.attrs["camera_variation_seed"] = int(args.camera_variation_seed)
             grp.attrs["camera_variation_target_camera"] = "agentview"
+            grp.attrs["camera_variation_uid_in_filename"] = bool(args.camera_variation_uid_in_filename)
+            grp.attrs["camera_variation_source_demo_file"] = str(Path(args.demo_file).resolve())
             if camera_variation_cfg is not None:
                 grp.attrs["camera_variation_config"] = json.dumps(camera_variation_cfg)
             grp.attrs["camera_variation_base_pos"] = json.dumps(base_pos.tolist())
